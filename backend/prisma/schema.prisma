@@ -1,0 +1,176 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String        @id @default(uuid())
+  name         String
+  email        String        @unique
+  passwordHash String        @map("password_hash")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  memberships  GroupMembership[]
+  paidExpenses Expense[]       @relation("ExpensePayer")
+  splits       ExpenseParticipant[]
+  sentPayments Payment[]       @relation("PaymentSender")
+  receivedPayments Payment[]   @relation("PaymentReceiver")
+  importJobs   ImportJob[]
+  auditLogs    AuditLog[]
+
+  @@map("users")
+}
+
+model Group {
+  id          String            @id @default(uuid())
+  name        String
+  description String?
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  memberships GroupMembership[]
+  expenses    Expense[]
+  payments    Payment[]
+  importJobs  ImportJob[]
+
+  @@map("groups")
+}
+
+model GroupMembership {
+  id        String    @id @default(uuid())
+  groupId   String    @map("group_id")
+  userId    String    @map("user_id")
+  joinedAt  DateTime  @default(now()) @map("joined_at")
+  leftAt    DateTime? @map("left_at")
+
+  group     Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, userId, joinedAt])
+  @@map("group_memberships")
+}
+
+model Expense {
+  id           String               @id @default(uuid())
+  groupId      String               @map("group_id")
+  title        String
+  amount       Decimal              @map("amount")
+  currency     String               @default("INR")
+  exchangeRate Decimal              @map("exchange_rate") // rate to convert to INR (e.g. amount * rate = amount_inr)
+  amountInr    Decimal              @map("amount_inr")
+  paidById     String               @map("paid_by_id")
+  splitType    String               @map("split_type") // EQUAL, EXACT, PERCENTAGE, SHARES, SETTLEMENT
+  expenseDate  DateTime             @map("expense_date")
+  createdAt    DateTime             @default(now()) @map("created_at")
+  updatedAt    DateTime             @updatedAt @map("updated_at")
+
+  group        Group                @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  payer        User                 @relation("ExpensePayer", fields: [paidById], references: [id])
+  participants ExpenseParticipant[]
+
+  @@index([groupId, expenseDate])
+  @@map("expenses")
+}
+
+model ExpenseParticipant {
+  id             String   @id @default(uuid())
+  expenseId      String   @map("expense_id")
+  userId         String   @map("user_id")
+  shareAmount    Decimal  @map("share_amount") // Owed amount in original currency
+  shareAmountInr Decimal  @map("share_amount_inr") // Owed amount in INR
+  rawSplitValue  Decimal? @map("raw_split_value") // exact value user split (e.g. 30 for 30%, or 2 for 2 shares)
+
+  expense        Expense  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([expenseId, userId])
+  @@map("expense_participants")
+}
+
+model Payment {
+  id           String   @id @default(uuid())
+  groupId      String   @map("group_id")
+  fromUserId   String   @map("from_user_id")
+  toUserId     String   @map("to_user_id")
+  amount       Decimal  @map("amount")
+  currency     String   @default("INR")
+  exchangeRate Decimal  @map("exchange_rate")
+  amountInr    Decimal  @map("amount_inr")
+  paymentDate  DateTime @map("payment_date")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  group        Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  sender       User     @relation("PaymentSender", fields: [fromUserId], references: [id])
+  receiver     User     @relation("PaymentReceiver", fields: [toUserId], references: [id])
+
+  @@index([groupId, paymentDate])
+  @@map("payments")
+}
+
+model ExchangeRate {
+  id            String   @id @default(uuid())
+  fromCurrency  String   @map("from_currency")
+  toCurrency    String   @map("to_currency")
+  rate          Decimal  @map("rate")
+  effectiveDate DateTime @default(now()) @map("effective_date")
+
+  @@unique([fromCurrency, toCurrency, effectiveDate])
+  @@map("exchange_rates")
+}
+
+model ImportJob {
+  id          String           @id @default(uuid())
+  groupId     String           @map("group_id")
+  uploadedById String           @map("uploaded_by_id")
+  status      String           // PENDING, COMPLETED, FAILED
+  fileName    String           @map("file_name")
+  rowCount    Int              @map("row_count")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  group       Group            @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  uploader    User             @relation(fields: [uploadedById], references: [id])
+  anomalies   ImportAnomaly[]
+
+  @@map("import_jobs")
+}
+
+model ImportAnomaly {
+  id                String   @id @default(uuid())
+  jobId             String   @map("job_id")
+  rowNumber         Int      @map("row_number")
+  anomalyType       String   @map("anomaly_type") // e.g. DUPLICATE, INVALID_DATE, etc.
+  severity          String   // ERROR, WARNING
+  description       String
+  affectedRowsJson  String   @map("affected_rows_json")  // Original CSV record columns
+  recommendedAction String   @map("recommended_action")
+  userDecision      String   @default("PENDING") // PENDING, APPROVE_FIX, IGNORE, EDIT
+  resolvedValueJson String?  @map("resolved_value_json") // Stored resolved values to import
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  job               ImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@map("import_anomalies")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?  @map("user_id")
+  action     String   // CREATE_EXPENSE, DELETE_EXPENSE, RESOLVE_ANOMALY, etc.
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  oldValue   String?  @map("old_value")
+  newValue   String?  @map("new_value")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("audit_logs")
+}
